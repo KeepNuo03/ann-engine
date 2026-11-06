@@ -26,11 +26,11 @@ endif()
 
 find_package(OpenMP)
 
-# Core library (header + sources). More sources are added as components land.
-add_library(ann INTERFACE)
-target_include_directories(ann INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# Core library
+add_library(ann STATIC src/bruteforce.cpp)
+target_include_directories(ann PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 if(OpenMP_CXX_FOUND)
-  target_link_libraries(ann INTERFACE OpenMP::OpenMP_CXX)
+  target_link_libraries(ann PUBLIC OpenMP::OpenMP_CXX)
 endif()
 
 # Tests (doctest is vendored in third_party/ so no network is needed at build time)
@@ -38,6 +38,8 @@ enable_testing()
 add_executable(ann_tests
   tests/test_main.cpp
   tests/test_dataset.cpp
+  tests/test_distance.cpp
+  tests/test_bruteforce.cpp
 )
 target_include_directories(ann_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 target_link_libraries(ann_tests PRIVATE ann)
@@ -46,3 +48,8 @@ add_test(NAME ann_tests COMMAND ann_tests)
 # Small tool that loads SIFT1M and prints shapes; replaced by bench/ later.
 add_executable(inspect_data tools/inspect_data.cpp)
 target_link_libraries(inspect_data PRIVATE ann)
+
+# Benchmark driver. hnswlib v0.8.0 is vendored header-only in third_party/hnswlib.
+add_executable(bench bench/bench_main.cpp)
+target_include_directories(bench SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+target_link_libraries(bench PRIVATE ann)
