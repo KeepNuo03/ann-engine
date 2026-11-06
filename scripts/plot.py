@@ -23,7 +23,8 @@ def main():
     fig, ax = plt.subplots(figsize=(7, 5))
     for (algo, M, efc), g in df.groupby(["algo", "M", "efc"]):
         g = g.sort_values("recall10")
-        ax.plot(g.recall10, g.qps, marker="o", label=f"{algo} (M={M}, efc={efc})")
+        name = {"hnsw_v3": "ours, v3", "hnsw_v0": "ours, v0", "hnsw": "ours", "hnswlib": "hnswlib"}.get(algo, algo)
+        ax.plot(g.recall10, g.qps, marker="o", label=f"{name} (M={M}, efc={efc})")
     ax.set_yscale("log")
     ax.set_xlim(left=max(0.0, min(0.8, df.recall10.min() - 0.02)), right=1.0)
     ax.set_xlabel("Recall@10")

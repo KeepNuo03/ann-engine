@@ -9,6 +9,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release >/dev/null
 cmake --build build -j >/dev/null
 COMMON="--base $D/sift_base.fvecs --query $D/sift_query.fvecs --gt $D/sift_groundtruth.ivecs --k 10"
 NPROC=$(nproc)
+rm -f results/hnsw.csv   # fresh sweep with the current default variant (v3)
 
 echo "== hnsw (ours) M=16 efc=200, all $NPROC threads (builds the index unpinned and caches it)"
 ./build/bench $COMMON --algo hnsw --M 16 --efc 200 \

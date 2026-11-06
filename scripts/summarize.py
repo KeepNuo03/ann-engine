@@ -54,26 +54,31 @@ def summary(out):
     frames = [f for f in (load("hnsw.csv"), load("hnswlib.csv"), load("ablation.csv")) if f is not None]
     if not frames:
         return
-    df = pd.concat(frames, ignore_index=True)
-    df = df[(df.threads == 1) & (df.ef > 0)]
-    build = pd.concat(frames, ignore_index=True)
+    alldf = pd.concat(frames, ignore_index=True)
+    df = alldf[(alldf.threads == 1) & (alldf.ef > 0)]
+    # Our current implementation is v3; older unlabeled "hnsw" rows predate the variants.
+    show = {"hnsw_v3": "ours (v3)", "hnsw_v0": "ours (v0, naive visited set)", "hnswlib": "hnswlib"}
+
+    def build_time(is_lib):
+        sel = alldf[(alldf.build_s > 0) & ((alldf.algo == "hnswlib") if is_lib else
+                                          (alldf.algo.str.startswith("hnsw") & (alldf.algo != "hnswlib")))]
+        return f"{sel.build_s.iloc[-1]:.1f}" if len(sel) else ""
+
     rows = []
     for target in (0.95, 0.99):
-        for algo, g in df.groupby("algo"):
+        for algo, label in show.items():
+            g = df[df.algo == algo]
             ok = g[g.recall10 >= target].sort_values("ef")
             if ok.empty:
                 continue
             r = ok.drop_duplicates("ef", keep="last").iloc[0]
-            fam = "hnswlib" if algo == "hnswlib" else "hnsw"
-            b = build[(build.algo.str.startswith(fam)) & (build.build_s > 0)].build_s
-            rows.append({"t": f">= {target}", "algo": algo, "ef": int(r.ef), "rec": f"{r.recall10:.4f}",
+            rows.append({"t": f">= {target}", "algo": label, "ef": int(r.ef), "rec": f"{r.recall10:.4f}",
                          "qps": f"{r.qps:.0f}", "p99": f"{r.p99_us:.0f}",
-                         "build": f"{b.iloc[-1]:.1f}" if len(b) else "",
-                         "mem": f"{(r.graph_bytes + r.vector_bytes) / 1e6:.0f}"})
+                         "build": build_time(algo == "hnswlib")})
     out.append("### Summary (single thread, smallest ef reaching the recall target)\n")
-    out.append(fmt_table(pd.DataFrame(rows), ["t", "algo", "ef", "rec", "qps", "p99", "build", "mem"],
+    out.append(fmt_table(pd.DataFrame(rows), ["t", "algo", "ef", "rec", "qps", "p99", "build"],
                          ["Recall target", "Implementation", "ef", "Recall@10", "QPS", "p99 (us)",
-                          "Build (s, all cores)", "Graph + vectors (MB)"]))
+                          "Index build (s, all cores)"]))
     out.append("")
 
 
