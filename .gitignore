@@ -1,0 +1,6 @@
+build/
+build-*/
+data/
+*.bin
+compile_commands.json
+__pycache__/
