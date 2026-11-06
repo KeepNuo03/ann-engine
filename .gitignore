@@ -5,3 +5,6 @@ data/
 compile_commands.json
 __pycache__/
 results/*.bin
+results/*.data
+results/*.data.old
+build-prof/
