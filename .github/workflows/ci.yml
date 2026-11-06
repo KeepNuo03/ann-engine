@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [Release, ASan]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: |
+          if [ "${{ matrix.build }}" = "ASan" ]; then
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DANN_SANITIZE=ON
+          else
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          fi
+      - name: Build
+        run: cmake --build build -j
+      - name: Unit tests
+        run: ./build/ann_tests

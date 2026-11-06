@@ -1,5 +1,7 @@
 # ann-engine
 
+[![CI](https://github.com/KeepNuo03/ann-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/KeepNuo03/ann-engine/actions/workflows/ci.yml)
+
 HNSW approximate nearest neighbor search written from scratch in C++17, with AVX2 distance kernels, a parallel index build, and a reproducible benchmark against [hnswlib](https://github.com/nmslib/hnswlib) on SIFT1M.
 
 On SIFT1M (1M vectors, 128 dimensions), single thread, same graph parameters as hnswlib (M=16, efConstruction=200):
@@ -105,3 +107,7 @@ third_party/   vendored doctest.h (MIT) and hnswlib v0.8.0 headers (Apache-2.0)
 - Y. A. Malkov, D. A. Yashunin. *Efficient and robust approximate nearest neighbor search using Hierarchical Navigable Small World graphs.* IEEE TPAMI, 2018.
 - SIFT1M from the [TEXMEX corpus](http://corpus-texmex.irisa.fr/).
 - [hnswlib](https://github.com/nmslib/hnswlib), used as the reference implementation.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Vendored third-party code keeps its own license: doctest (MIT) and hnswlib (Apache-2.0, `third_party/hnswlib/LICENSE`).
