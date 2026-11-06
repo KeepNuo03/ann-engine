@@ -10,14 +10,14 @@ cmake --build build -j >/dev/null
 COMMON="--base $D/sift_base.fvecs --query $D/sift_query.fvecs --gt $D/sift_groundtruth.ivecs --k 10"
 NPROC=$(nproc)
 
-echo "== hnsw (ours) M=16 efc=200, single thread (pinned to CPU 0)"
-taskset -c 0 ./build/bench $COMMON --algo hnsw --M 16 --efc 200 \
-  --ef 10,20,40,80,120,200,400,800 --threads 1 --build-threads "$NPROC" \
+echo "== hnsw (ours) M=16 efc=200, all $NPROC threads (builds the index unpinned and caches it)"
+./build/bench $COMMON --algo hnsw --M 16 --efc 200 \
+  --ef 10,20,40,80,120,200,400,800 --threads "$NPROC" --build-threads "$NPROC" \
   --index-cache results/hnsw_M16_efc200.bin --out results/hnsw.csv
 
-echo "== hnsw (ours) M=16 efc=200, all $NPROC threads"
-./build/bench $COMMON --algo hnsw --M 16 --efc 200 \
-  --ef 10,20,40,80,120,200,400,800 --threads "$NPROC" \
+echo "== hnsw (ours) M=16 efc=200, single thread (pinned to CPU 0, loads the cached index)"
+taskset -c 0 ./build/bench $COMMON --algo hnsw --M 16 --efc 200 \
+  --ef 10,20,40,80,120,200,400,800 --threads 1 \
   --index-cache results/hnsw_M16_efc200.bin --out results/hnsw.csv
 
 python3 scripts/plot.py results/hnswlib.csv results/hnsw.csv --out results/recall_qps.png
