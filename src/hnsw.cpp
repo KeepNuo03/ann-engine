@@ -7,6 +7,10 @@
 #include <queue>
 #include <random>
 #include <stdexcept>
+#include <unordered_set>
+#if defined(__SSE__)
+#include <xmmintrin.h>
+#endif
 
 #include "ann/distance.h"
 #include "ann/visited.h"
@@ -27,6 +31,34 @@ struct Closer {  // min-heap on distance
 
 thread_local VisitedList tl_visited;
 thread_local size_t tl_dist_count = 0;
+
+inline void prefetch(const void* p) {
+#if defined(__SSE__)
+  _mm_prefetch(static_cast<const char*>(p), _MM_HINT_T0);
+#else
+  __builtin_prefetch(p, 0, 3);
+#endif
+}
+
+// Visited-set adapters with the same interface.
+struct EpochVisited {
+  VisitedList& v;
+  explicit EpochVisited(size_t n) : v(tl_visited) {
+    v.resize(n);
+    v.reset();
+  }
+  bool try_mark(uint32_t id) { return v.try_mark(id); }
+  const void* addr(uint32_t id) const { return v.data() + id; }
+};
+struct HashVisited {
+  std::unordered_set<uint32_t> s;
+  explicit HashVisited(size_t) {}
+  bool try_mark(uint32_t id) { return s.insert(id).second; }
+  const void* addr(uint32_t) const { return nullptr; }
+};
+
+// Reused per-thread heap storage so a query does not allocate.
+thread_local std::vector<Neighbor> tl_cand, tl_res;
 
 constexpr uint32_t kMagic = 0x57534e48;  // "HNSW"
 constexpr uint32_t kVersion = 1;
@@ -282,21 +314,150 @@ void HNSWIndex::build(int threads) {
   }
 }
 
-std::vector<Neighbor> HNSWIndex::knn(const float* q, size_t k, size_t ef) const {
+const char* variant_name(SearchVariant v) {
+  switch (v) {
+    case SearchVariant::kHashSet: return "v0_hashset";
+    case SearchVariant::kEpoch: return "v1_epoch";
+    case SearchVariant::kInterleaved: return "v2_interleaved";
+    case SearchVariant::kPrefetch: return "v3_prefetch";
+  }
+  return "?";
+}
+
+void HNSWIndex::set_variant(SearchVariant v) {
+  variant_ = v;
+  if (v >= SearchVariant::kInterleaved && !packed_) pack_level0();
+}
+
+void HNSWIndex::pack_level0() {
+  const size_t link_bytes = (1 + M0_) * sizeof(uint32_t);
+  packed_vec_off_ = (link_bytes + 63) / 64 * 64;
+  packed_stride_ = (packed_vec_off_ + d_ * sizeof(float) + 63) / 64 * 64;
+  void* p = std::aligned_alloc(64, packed_stride_ * n_);
+  if (!p) throw std::bad_alloc();
+  packed_.reset(static_cast<char*>(p));
+  for (uint32_t i = 0; i < n_; ++i) {
+    char* node = packed_.get() + i * packed_stride_;
+    std::memset(node, 0, packed_stride_);
+    std::memcpy(node, links(i, 0), link_bytes);
+    std::memcpy(node + packed_vec_off_, data_->row(i), d_ * sizeof(float));
+  }
+}
+
+// Level-0 beam search used at query time. Same algorithm as search_layer, with
+// manual heaps on reused per-thread buffers, and compile-time switches for the
+// visited set, memory layout and prefetching. Writes the k best (closest
+// first) into out and returns how many.
+template <class Visited, bool kInterleaved, bool kPrefetch>
+size_t HNSWIndex::search_level0(const float* q, Neighbor entry, size_t ef, size_t k,
+                                Neighbor* out) const {
+  Visited visited(n_);
+  auto& cand = tl_cand;  // min-heap (closest on top) via Closer
+  auto& res = tl_res;    // max-heap (farthest on top)
+  cand.clear();
+  res.clear();
+  cand.reserve(ef * 2 + M0_);
+  res.reserve(ef + 1);
+
+  auto node_links = [&](uint32_t id) -> const uint32_t* {
+    if constexpr (kInterleaved)
+      return reinterpret_cast<const uint32_t*>(packed_.get() + id * packed_stride_);
+    else
+      return &level0_[static_cast<size_t>(id) * (1 + M0_)];
+  };
+  auto node_vec = [&](uint32_t id) -> const float* {
+    if constexpr (kInterleaved)
+      return reinterpret_cast<const float*>(packed_.get() + id * packed_stride_ + packed_vec_off_);
+    else
+      return data_->row(id);
+  };
+
+  visited.try_mark(entry.second);
+  cand.push_back(entry);
+  res.push_back(entry);
+  size_t dcount = 0;
+
+  while (!cand.empty()) {
+    Neighbor c = cand.front();
+    if (c.first > res.front().first && res.size() >= ef) break;
+    std::pop_heap(cand.begin(), cand.end(), Closer());
+    cand.pop_back();
+
+    const uint32_t* l = node_links(c.second);
+    const uint32_t cnt = l[0];
+    const uint32_t* ids = l + 1;
+    if constexpr (kPrefetch) {
+      if (cnt > 0) {
+        prefetch(visited.addr(ids[0]));
+        prefetch(node_vec(ids[0]));
+      }
+    }
+    for (uint32_t j = 0; j < cnt; ++j) {
+      const uint32_t e = ids[j];
+      if constexpr (kPrefetch) {
+        if (j + 1 < cnt) {
+          // Start loading the next neighbor's vector (first two cache lines)
+          // and its visited tag while this one is being processed.
+          const char* nv = reinterpret_cast<const char*>(node_vec(ids[j + 1]));
+          prefetch(visited.addr(ids[j + 1]));
+          prefetch(nv);
+          prefetch(nv + 64);
+        }
+      }
+      if (!visited.try_mark(e)) continue;
+      const float de = l2sq(q, node_vec(e), d_);
+      ++dcount;
+      if (res.size() < ef || de < res.front().first) {
+        cand.emplace_back(de, e);
+        std::push_heap(cand.begin(), cand.end(), Closer());
+        if constexpr (kPrefetch) prefetch(node_links(e));
+        res.emplace_back(de, e);
+        std::push_heap(res.begin(), res.end());
+        if (res.size() > ef) {
+          std::pop_heap(res.begin(), res.end());
+          res.pop_back();
+        }
+      }
+    }
+  }
+  tl_dist_count += dcount;
+  std::sort_heap(res.begin(), res.end());  // ascending distance
+  const size_t m = std::min(k, res.size());
+  std::copy(res.begin(), res.begin() + static_cast<long>(m), out);
+  return m;
+}
+
+size_t HNSWIndex::query(const float* q, size_t k, size_t ef, Neighbor* out) const {
   tl_dist_count = 0;
-  if (max_level_ < 0) return {};
+  if (max_level_ < 0 || k == 0) return 0;
   Neighbor cur{dist(q, entry_), entry_};
   cur = greedy_descend(q, cur, max_level_, 0, false);
-  auto res = search_layer(q, {cur}, std::max(ef, k), 0, false);  // farthest first
-  std::reverse(res.begin(), res.end());
-  if (res.size() > k) res.resize(k);
+  ef = std::max(ef, k);
+  switch (variant_) {
+    case SearchVariant::kHashSet:
+      return search_level0<HashVisited, false, false>(q, cur, ef, k, out);
+    case SearchVariant::kEpoch:
+      return search_level0<EpochVisited, false, false>(q, cur, ef, k, out);
+    case SearchVariant::kInterleaved:
+      return search_level0<EpochVisited, true, false>(q, cur, ef, k, out);
+    case SearchVariant::kPrefetch:
+    default:
+      return search_level0<EpochVisited, true, true>(q, cur, ef, k, out);
+  }
+}
+
+std::vector<Neighbor> HNSWIndex::knn(const float* q, size_t k, size_t ef) const {
+  std::vector<Neighbor> res(k);
+  res.resize(query(q, k, ef, res.data()));
   return res;
 }
 
 size_t HNSWIndex::knn_ids(const float* q, size_t k, size_t ef, uint32_t* out) const {
-  auto res = knn(q, k, ef);
-  for (size_t i = 0; i < res.size(); ++i) out[i] = res[i].second;
-  return res.size();
+  thread_local std::vector<Neighbor> buf;
+  buf.resize(k);
+  size_t m = query(q, k, ef, buf.data());
+  for (size_t i = 0; i < m; ++i) out[i] = buf[i].second;
+  return m;
 }
 
 size_t HNSWIndex::graph_bytes() const {

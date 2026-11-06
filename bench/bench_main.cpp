@@ -40,6 +40,7 @@ struct Args {
   size_t M = 16, efc = 200, k = 10, nq = 0;
   std::vector<size_t> ef = {10, 20, 40, 80, 120, 200, 400, 800};
   int threads = 1, build_threads = 0, repeats = 3;
+  std::string variant = "v3";
 };
 
 std::vector<size_t> parse_list(const std::string& s) {
@@ -54,7 +55,8 @@ void usage() {
   std::fprintf(stderr,
                "usage: bench --base F --query F --gt F --algo brute|hnswlib|hnsw [--M 16] [--efc 200]\n"
                "             [--ef 10,20,...] [--k 10] [--threads 1] [--build-threads N]\n"
-               "             [--nq N] [--repeats 3] [--index-cache F] [--out results.csv]\n");
+               "             [--nq N] [--repeats 3] [--index-cache F] [--out results.csv]\n"
+               "             [--variant v0|v1|v2|v3]   (hnsw only, default v3)\n");
 }
 
 Args parse(int argc, char** argv) {
@@ -77,6 +79,7 @@ Args parse(int argc, char** argv) {
   get("algo", a.algo);
   get("out", a.out);
   get("index-cache", a.index_cache);
+  get("variant", a.variant);
   if (kv.count("M")) a.M = std::stoul(kv["M"]);
   if (kv.count("efc")) a.efc = std::stoul(kv["efc"]);
   if (kv.count("k")) a.k = std::stoul(kv["k"]);
@@ -285,8 +288,16 @@ std::vector<Row> bench_hnsw(const Args& a, const ann::Dataset& base, const ann::
                 a.build_threads);
     if (!a.index_cache.empty()) index->save(a.index_cache);
   }
-  std::printf("hnsw: max_level=%d graph=%.1f MB unreachable=%zu\n", index->max_level(),
-              index->graph_bytes() / 1e6, index->unreachable_count());
+  const std::map<std::string, ann::SearchVariant> variants = {
+      {"v0", ann::SearchVariant::kHashSet},
+      {"v1", ann::SearchVariant::kEpoch},
+      {"v2", ann::SearchVariant::kInterleaved},
+      {"v3", ann::SearchVariant::kPrefetch}};
+  if (!variants.count(a.variant)) throw std::runtime_error("unknown --variant " + a.variant);
+  index->set_variant(variants.at(a.variant));
+  std::printf("hnsw: max_level=%d graph=%.1f MB packed=%.1f MB unreachable=%zu variant=%s\n",
+              index->max_level(), index->graph_bytes() / 1e6, index->packed_bytes() / 1e6,
+              index->unreachable_count(), ann::variant_name(index->variant()));
 
   std::vector<Row> rows;
   for (size_t ef : a.ef) {
@@ -303,7 +314,7 @@ std::vector<Row> bench_hnsw(const Args& a, const ann::Dataset& base, const ann::
     std::vector<uint32_t> ids;
     Row r;
     run_queries(nq, k, a.threads, a.repeats, search, ids, r.qps, r.p50, r.p99);
-    r.algo = "hnsw";
+    r.algo = std::string("hnsw_") + a.variant;
     r.M = a.M;
     r.efc = a.efc;
     r.ef = ef;
@@ -312,8 +323,8 @@ std::vector<Row> bench_hnsw(const Args& a, const ann::Dataset& base, const ann::
     r.build_s = loaded ? 0 : build_s;
     r.graph_bytes = index->graph_bytes();
     r.vector_bytes = base.bytes();
-    std::printf("hnsw    ef=%-4zu recall@%zu=%.4f qps=%9.1f p50=%7.1fus p99=%7.1fus dist/q=%.0f\n",
-                ef, k, r.recall, r.qps, r.p50, r.p99, dc);
+    std::printf("hnsw_%s ef=%-4zu recall@%zu=%.4f qps=%9.1f p50=%7.1fus p99=%7.1fus dist/q=%.0f\n",
+                a.variant.c_str(), ef, k, r.recall, r.qps, r.p50, r.p99, dc);
     rows.push_back(r);
   }
   return rows;

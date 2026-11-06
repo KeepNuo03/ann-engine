@@ -122,3 +122,21 @@ TEST_CASE("tiny inputs") {
   REQUIRE(res.size() == 1);
   CHECK(res[0].second == 0u);
 }
+
+TEST_CASE("all search variants return identical results") {
+  auto base = random_dataset(5000, 40, 10);  // d = 40: vector not a multiple of a cache line
+  auto qs = random_dataset(100, 40, 11);
+  ann::HNSWIndex idx(base, {});
+  idx.build(2);
+  std::vector<std::vector<ann::HNSWIndex::Neighbor>> ref;
+  idx.set_variant(ann::SearchVariant::kHashSet);
+  for (size_t i = 0; i < qs.n(); ++i) ref.push_back(idx.knn(qs.row(i), 10, 64));
+  for (auto v : {ann::SearchVariant::kEpoch, ann::SearchVariant::kInterleaved,
+                 ann::SearchVariant::kPrefetch}) {
+    idx.set_variant(v);
+    CAPTURE(ann::variant_name(v));
+    for (size_t i = 0; i < qs.n(); ++i) CHECK(idx.knn(qs.row(i), 10, 64) == ref[i]);
+  }
+  CHECK(idx.packed_bytes() % 64 == 0);
+  CHECK(idx.packed_bytes() >= base.n() * (40 * 4 + 33 * 4));
+}
