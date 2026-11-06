@@ -27,7 +27,7 @@ endif()
 find_package(OpenMP)
 
 # Core library
-add_library(ann STATIC src/bruteforce.cpp)
+add_library(ann STATIC src/bruteforce.cpp src/hnsw.cpp)
 target_include_directories(ann PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 if(OpenMP_CXX_FOUND)
   target_link_libraries(ann PUBLIC OpenMP::OpenMP_CXX)
@@ -40,6 +40,7 @@ add_executable(ann_tests
   tests/test_dataset.cpp
   tests/test_distance.cpp
   tests/test_bruteforce.cpp
+  tests/test_hnsw.cpp
 )
 target_include_directories(ann_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 target_link_libraries(ann_tests PRIVATE ann)

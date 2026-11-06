@@ -7,7 +7,7 @@
 //           --k 10 --threads 1 --index-cache results/hnswlib_M16_efc200.bin
 //           --out results/hnswlib.csv
 //
-// --algo: brute | hnswlib   (hnsw is added in step 3)
+// --algo: brute | hnswlib | hnsw
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -24,6 +24,7 @@
 #include "ann/bruteforce.h"
 #include "ann/dataset.h"
 #include "ann/distance.h"
+#include "ann/hnsw.h"
 #include "ann/metrics.h"
 #include "ann/timer.h"
 #include "hnswlib/hnswlib.h"
@@ -51,7 +52,7 @@ std::vector<size_t> parse_list(const std::string& s) {
 
 void usage() {
   std::fprintf(stderr,
-               "usage: bench --base F --query F --gt F --algo brute|hnswlib [--M 16] [--efc 200]\n"
+               "usage: bench --base F --query F --gt F --algo brute|hnswlib|hnsw [--M 16] [--efc 200]\n"
                "             [--ef 10,20,...] [--k 10] [--threads 1] [--build-threads N]\n"
                "             [--nq N] [--repeats 3] [--index-cache F] [--out results.csv]\n");
 }
@@ -262,6 +263,62 @@ std::vector<Row> bench_hnswlib(const Args& a, const ann::Dataset& base,
   return rows;
 }
 
+std::vector<Row> bench_hnsw(const Args& a, const ann::Dataset& base, const ann::Dataset& query,
+                            const ann::IdMatrix& gt) {
+  const size_t nq = gt.n(), k = a.k;
+  ann::HNSWParams p;
+  p.M = a.M;
+  p.ef_construction = a.efc;
+  double build_s = 0;
+  bool loaded = false;
+  std::unique_ptr<ann::HNSWIndex> index;
+  if (!a.index_cache.empty() && std::ifstream(a.index_cache)) {
+    index = std::make_unique<ann::HNSWIndex>(ann::HNSWIndex::load(a.index_cache, base));
+    loaded = true;
+    std::printf("hnsw: loaded index from %s\n", a.index_cache.c_str());
+  } else {
+    index = std::make_unique<ann::HNSWIndex>(base, p);
+    ann::Timer t;
+    index->build(a.build_threads);
+    build_s = t.seconds();
+    std::printf("hnsw: built M=%zu efc=%zu in %.1f s with %d threads\n", a.M, a.efc, build_s,
+                a.build_threads);
+    if (!a.index_cache.empty()) index->save(a.index_cache);
+  }
+  std::printf("hnsw: max_level=%d graph=%.1f MB unreachable=%zu\n", index->max_level(),
+              index->graph_bytes() / 1e6, index->unreachable_count());
+
+  std::vector<Row> rows;
+  for (size_t ef : a.ef) {
+    // Average distance computations per query at this ef (single pass, untimed).
+    double dc = 0;
+    std::vector<uint32_t> tmp(k);
+    for (size_t i = 0; i < std::min<size_t>(nq, 1000); ++i) {
+      index->knn_ids(query.row(i), k, ef, tmp.data());
+      dc += static_cast<double>(ann::HNSWIndex::last_distance_count());
+    }
+    dc /= static_cast<double>(std::min<size_t>(nq, 1000));
+
+    auto search = [&](size_t i, uint32_t* out) { index->knn_ids(query.row(i), k, ef, out); };
+    std::vector<uint32_t> ids;
+    Row r;
+    run_queries(nq, k, a.threads, a.repeats, search, ids, r.qps, r.p50, r.p99);
+    r.algo = "hnsw";
+    r.M = a.M;
+    r.efc = a.efc;
+    r.ef = ef;
+    r.threads = a.threads;
+    r.recall = ann::mean_recall(ids, gt, k);
+    r.build_s = loaded ? 0 : build_s;
+    r.graph_bytes = index->graph_bytes();
+    r.vector_bytes = base.bytes();
+    std::printf("hnsw    ef=%-4zu recall@%zu=%.4f qps=%9.1f p50=%7.1fus p99=%7.1fus dist/q=%.0f\n",
+                ef, k, r.recall, r.qps, r.p50, r.p99, dc);
+    rows.push_back(r);
+  }
+  return rows;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -281,6 +338,8 @@ int main(int argc, char** argv) {
       rows = bench_brute(a, base, query, gt);
     else if (a.algo == "hnswlib")
       rows = bench_hnswlib(a, base, query, gt);
+    else if (a.algo == "hnsw")
+      rows = bench_hnsw(a, base, query, gt);
     else
       throw std::runtime_error("unknown --algo " + a.algo);
     write_rows(a.out, rows);
