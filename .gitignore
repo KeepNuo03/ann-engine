@@ -4,3 +4,4 @@ data/
 *.bin
 compile_commands.json
 __pycache__/
+results/*.bin
